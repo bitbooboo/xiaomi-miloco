@@ -49,6 +49,30 @@ class TriggerRuleService:
         self._miot_proxy = miot_proxy
         self._mcp_client_manager = mcp_client_manager
 
+    async def _get_all_valid_camera_dids(self) -> list[str]:
+        """
+        获取所有有效的摄像头设备ID（包括 MIoT 和 Home Assistant）
+
+        Returns:
+            list[str]: 返回字符串列表（摄像头设备ID列表）
+        """
+        # 获取MIoT摄像头ID
+        valid_cameras = await self._miot_proxy.get_camera_dids()
+        
+        # 获取HA摄像头ID
+        try:
+            from miloco_server.service.manager import get_manager
+            manager = get_manager()
+            ha_cameras = await manager.ha_service.get_ha_cameras()
+            ha_camera_dids = [camera.did for camera in ha_cameras]
+            valid_cameras.extend(ha_camera_dids) # 将HA摄像头ID添加到有效摄像头ID列表中
+            logger.debug("Merged %d HA camera IDs with %d MIoT camera IDs", 
+                        len(ha_camera_dids), len(valid_cameras) - len(ha_camera_dids)) # 记录日志：合并了HA摄像头ID和MIoT摄像头ID
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to get HA cameras for validation, continuing with MIoT cameras only: %s", e) # 记录日志：获取HA摄像头失败，继续使用MIoT摄像头
+        
+        return valid_cameras # 返回有效摄像头ID列表
+
     async def create_trigger_rule(self, trigger_rule: TriggerRule) -> str:
         """
         Create trigger rule
@@ -68,8 +92,8 @@ class TriggerRuleService:
         if self._trigger_rule_dao.exists_by_name(trigger_rule.name):
             raise ConflictException(f"Trigger rule name '{trigger_rule.name}' already exists")
 
-        # Validate if camera device IDs are valid
-        valid_cameras = await self._miot_proxy.get_camera_dids()
+        # Validate if camera device IDs are valid (including both MIoT and HA cameras)
+        valid_cameras = await self._get_all_valid_camera_dids()
         invalid_dids = [
             did for did in trigger_rule.cameras if did not in valid_cameras
         ]
@@ -169,8 +193,8 @@ class TriggerRuleService:
         if self._trigger_rule_dao.exists_by_name(trigger_rule.name, trigger_rule.id):
             raise ConflictException(f"Trigger rule name '{trigger_rule.name}' already exists")
 
-        # Validate if camera device IDs are valid
-        valid_cameras = await self._miot_proxy.get_camera_dids()
+        # Validate if camera device IDs are valid (including both MIoT and HA cameras)
+        valid_cameras = await self._get_all_valid_camera_dids()
         invalid_dids = [
             did for did in trigger_rule.cameras if did not in valid_cameras
         ]

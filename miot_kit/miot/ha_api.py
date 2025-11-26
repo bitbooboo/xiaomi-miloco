@@ -261,3 +261,156 @@ class HAHttpClient:
             service="trigger",
             entity_id=automation if isinstance(automation, str) else automation.entity_id
         )
+
+    async def get_cameras_async(self, force_update: bool = True) -> Dict[str, HAStateInfo]:
+        # 从HA获取所有摄像头实例
+        res_obj = await self.get_states_async(force_update=force_update)
+        cameras: Dict[str, HAStateInfo] = {}
+        for e_id, item in res_obj.items():
+            if item.domain == "camera":
+                cameras[e_id] = item
+        return cameras
+
+    async def get_camera_snapshot_async(self, entity_id: str) -> bytes:
+        # 获取摄像头快照
+        if not entity_id:
+            raise ValueError("invalid entity_id")
+        
+        failed_methods = []  # 记录失败的方法和原因
+        
+        # 首先，尝试从entity_picture URL获取图像，entity_picture的URL中通常包含token
+        try:
+            state = await self.get_states_async(entity_id=entity_id, force_update=False)
+            if entity_id in state:
+                entity_picture = state[entity_id].attributes.get("entity_picture")
+                if entity_picture:
+                    # 构建完整 URL
+                    if entity_picture.startswith("/"):
+                        image_url = f"{self._base_url}{entity_picture}"
+                    elif entity_picture.startswith("http"):
+                        image_url = entity_picture
+                    else:
+                        image_url = f"{self._base_url}/{entity_picture}"
+                    
+                    # 检查URL是否已包含token参数
+                    # 如果entity_picture包含 token，直接使用，无需Authorization头
+                    # 否则，添加 Authorization 头
+                    headers = {}
+                    if "token=" not in image_url:
+                        headers["Authorization"] = f"Bearer {self._token}"
+                    
+                    img_res = await self._session.get(
+                        url=image_url,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=HA_HTTP_API_TIMEOUT)
+                    )
+                    if img_res.status == 200:
+                        _LOGGER.info("尝试从 entity_picture URL 获取图像，entity_picture的URL中通常包含token 获取 %d for %s", img_res.status, entity_id)
+                        return await img_res.read()
+                    else:
+                        error_msg = f"entity_picture returned status {img_res.status}"
+                        failed_methods.append(f"entity_picture: {error_msg}")
+                        _LOGGER.warning("Method 1 (entity_picture) failed for %s: %s", entity_id, error_msg)
+                else:
+                    failed_methods.append("entity_picture: attribute not found")
+                    _LOGGER.warning("Method 1 (entity_picture) failed for %s: entity_picture attribute not found", entity_id)
+            else:
+                failed_methods.append("entity_picture: entity not found in state")
+                _LOGGER.warning("Method 1 (entity_picture) failed for %s: entity not found in state", entity_id)
+        except Exception as e:
+            error_msg = f"Exception: {str(e)}"
+            failed_methods.append(f"entity_picture: {error_msg}")
+            _LOGGER.warning("Method 1 (entity_picture) failed for %s: %s", entity_id, error_msg)
+        
+        # 回退方案：尝试使用属性中的access_token从摄像头代理URL获取
+        try:
+            state = await self.get_states_async(entity_id=entity_id, force_update=False)
+            if entity_id in state:
+                access_token = state[entity_id].attributes.get("access_token")
+                if access_token:
+                    # 使用camera_proxy和属性中的access_token
+                    proxy_url = f"{self._base_url}/api/camera_proxy/{entity_id}?token={access_token}"
+                    proxy_res = await self._session.get(
+                        url=proxy_url,
+                        timeout=aiohttp.ClientTimeout(total=HA_HTTP_API_TIMEOUT)
+                    )
+                    if proxy_res.status == 200:
+                        _LOGGER.info("尝试使用属性中的 access_token 从摄像头代理 URL 获取 %d for %s", proxy_res.status, entity_id)
+                        return await proxy_res.read()
+                    else:
+                        error_msg = f"HTTP status {proxy_res.status}"
+                        failed_methods.append(f"camera_proxy with access_token: {error_msg}")
+                        _LOGGER.warning("Method 2 (camera_proxy with access_token) failed for %s: %s", entity_id, error_msg)
+                else:
+                    failed_methods.append("camera_proxy with access_token: access_token attribute not found")
+                    _LOGGER.warning("Method 2 (camera_proxy with access_token) failed for %s: access_token attribute not found", entity_id)
+            else:
+                failed_methods.append("camera_proxy with access_token: entity not found in state")
+                _LOGGER.warning("Method 2 (camera_proxy with access_token) failed for %s: entity not found in state", entity_id)
+        except Exception as e:
+            error_msg = f"Exception: {str(e)}"
+            failed_methods.append(f"camera_proxy with access_token: {error_msg}")
+            _LOGGER.warning("Method 2 (camera_proxy with access_token) failed for %s: %s", entity_id, error_msg)
+        
+        # 回退方案：尝试使用Authorization头的摄像头代理URL
+        try:
+            proxy_url = f"{self._base_url}/api/camera_proxy/{entity_id}"
+            proxy_res = await self._session.get(
+                url=proxy_url,
+                headers={
+                    "Authorization": f"Bearer {self._token}"
+                },
+                timeout=aiohttp.ClientTimeout(total=HA_HTTP_API_TIMEOUT)
+            )
+            if proxy_res.status == 200:
+                _LOGGER.info("尝试使用 Authorization 头的摄像头代理 URL 获取 %d for %s", proxy_res.status, entity_id)
+                return await proxy_res.read()
+            else:
+                error_msg = f"HTTP status {proxy_res.status}"
+                failed_methods.append(f"camera_proxy: {error_msg}")
+                _LOGGER.warning("Method 3 (camera_proxy) failed for %s: %s", entity_id, error_msg)
+        except Exception as e:
+            error_msg = f"Exception: {str(e)}"
+            failed_methods.append(f"camera_proxy: {error_msg}")
+            _LOGGER.warning("Method 3 (camera_proxy) failed for %s: %s", entity_id, error_msg)
+        
+        # 最后手段：尝试摄像头快照服务（需要filename参数，可能不适用于所有摄像头）
+        try:
+            http_res = await self._session.post(
+                url=f"{self._base_url}/api/services/camera/snapshot",
+                json={"entity_id": entity_id},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._token}"
+                },
+                timeout=aiohttp.ClientTimeout(total=HA_HTTP_API_TIMEOUT)
+            )
+        
+            if http_res.status == 401:
+                raise TypeError("ha api get failed, unauthorized(401)")
+        
+            # 如果快照服务成功，尝试从响应中获取图像
+            if http_res.status in [200, 201]:
+                content_type = http_res.headers.get("Content-Type", "")
+                if "image" in content_type:
+                    _LOGGER.info("尝试使用快照服务获取图像 %d for %s", http_res.status, entity_id)
+                    return await http_res.read()
+                else:
+                    error_msg = f"HTTP status {http_res.status}, Content-Type: {content_type} (not an image)"
+                    failed_methods.append(f"snapshot service: {error_msg}")
+                    _LOGGER.warning("Method 4 (snapshot service) failed for %s: %s", entity_id, error_msg)
+            else:
+                error_msg = f"HTTP status {http_res.status}"
+                failed_methods.append(f"snapshot service: {error_msg}")
+                _LOGGER.warning("Method 4 (snapshot service) failed for %s: %s", entity_id, error_msg)
+        except TypeError:
+            # 重新抛出授权错误
+            raise
+        except Exception as e:
+            error_msg = f"Exception: {str(e)}"
+            failed_methods.append(f"snapshot service: {error_msg}")
+            _LOGGER.warning("Method 4 (snapshot service) failed for %s: %s", entity_id, error_msg)
+        
+        # 如果所有方法都失败，抛出包含详细信息的错误
+        error_details = "; ".join(failed_methods)
+        raise ValueError(f"Failed to get camera snapshot for {entity_id}: all methods failed. Details: {error_details}")

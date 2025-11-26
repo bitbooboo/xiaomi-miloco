@@ -29,16 +29,24 @@ const Login = () => {
 
   useEffect(() => {
     const fetchData = async () => {
-      const res = await getJudgeLogin()
-      const { code = 0, data: { is_registered } } = res
-      if (code === 0 && !is_registered) {
-        navigate("/setup")
-        return
+      try {
+        const res = await getJudgeLogin()
+        // Safely check response structure
+        if (res && res.code === 0 && res.data) {
+          const { is_registered } = res.data
+          if (!is_registered) {
+            navigate("/setup")
+            return
+          }
+        }
+      } catch (error) {
+        // Silently fail - continue to show login page even if API call fails
+        console.warn('Failed to check register status:', error)
       }
     }
     fetchData()
     inputRef.current?.focus()
-  }, [])
+  }, [navigate])
 
   const handleSubmit = useCallback(async (inputPin) => {
     if (loading) {return;}

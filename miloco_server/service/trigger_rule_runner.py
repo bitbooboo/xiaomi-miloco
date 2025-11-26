@@ -119,6 +119,19 @@ class TriggerRuleRunner:
             camera_id: CameraInfo.model_validate(miot_camera_info.model_dump())
             for camera_id, miot_camera_info in miot_camera_info_dict.items()
         }
+        
+        # 用于获取HA摄像头信息，并将其合并到已有的MIoT摄像头字典中，以便后续统一处理所有摄像头
+        try:
+            from miloco_server.service.manager import get_manager
+            manager = get_manager()
+            ha_cameras = await manager.ha_service.get_ha_cameras()
+            for ha_camera in ha_cameras:
+                camera_info_dict[ha_camera.did] = ha_camera
+            logger.debug("Merged %d HA cameras with %d MIoT cameras", 
+                        len(ha_cameras), len(camera_info_dict) - len(ha_cameras))
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to get HA cameras, continuing with MIoT cameras only: %s", e)
+        
         camera_motion_dict: dict[str,
                                  dict[int,
                                       tuple[bool,
@@ -127,12 +140,32 @@ class TriggerRuleRunner:
         for camera_id, camera_info in camera_info_dict.items():
             if camera_id not in camera_motion_dict:
                 camera_motion_dict[camera_id] = {}
+            
+            # 检查是否为HA摄像头
+            is_ha_camera = camera_id.startswith("ha_")
+            
             for channel in range(camera_info.channel_count or 1):
                 logger.info(
                     "camera %s channel %s get recent camera img", camera_id, channel
                 )
-                camera_img_seq = self.miot_proxy.get_recent_camera_img(
-                    camera_id, channel, self._vision_use_img_count)
+                
+                # 根据摄像头类型获取摄像头图像
+                if is_ha_camera:
+                    # 对于HA摄像头，使用ha_proxy获取图像
+                    try:
+                        from miloco_server.service.manager import get_manager
+                        manager = get_manager()
+                        entity_id = camera_id[3:]  # Remove "ha_" prefix
+                        camera_img_seq = await manager.ha_proxy.get_recent_camera_img(
+                            entity_id, channel, self._vision_use_img_count)
+                    except Exception as e:  # pylint: disable=broad-exception-caught
+                        logger.warning("Failed to get HA camera image for %s: %s", camera_id, e)
+                        camera_img_seq = None
+                else:
+                    # For MIoT cameras, use miot_proxy
+                    camera_img_seq = self.miot_proxy.get_recent_camera_img(
+                        camera_id, channel, self._vision_use_img_count)
+                
                 if camera_img_seq and self._check_camera_motion(
                         camera_img_seq):
                     logger.info(
@@ -221,8 +254,19 @@ class TriggerRuleRunner:
         )
 
         for condition_result in condition_result_list:
-            is_motion, camera_img_seq = camera_motion_dict[condition_result.camera_info.did][condition_result.channel]
-            if is_motion and condition_result.result and camera_img_seq:
+            camera_id = condition_result.camera_info.did
+            channel = condition_result.channel
+            # 检查摄像头和通道是否存在于camera_motion_dict中，如果不存在则记录日志并跳过
+            if camera_id not in camera_motion_dict:
+                logger.warning("Camera %s not found in camera_motion_dict when logging", camera_id)
+                continue
+            if channel not in camera_motion_dict[camera_id]:
+                logger.warning("Channel %s not found for camera %s when logging", channel, camera_id)
+                continue
+            
+            is_motion, camera_img_seq = camera_motion_dict[camera_id][channel] # 获取摄像头运动状态和图像序列
+            # 只要记录规则日志就保存图片（只要有图像序列就保存）
+            if camera_img_seq:
                 path_seq: CameraImgPathSeq = await camera_img_seq.store_to_path()
                 condition_result.images = path_seq.img_list
 
@@ -299,11 +343,24 @@ class TriggerRuleRunner:
         condition_result_list: List[TriggerConditionResult] = []
 
         for camera_id in rule.cameras:
-            camera_info = camera_info_dict[camera_id]
-            channel_motion_dict = camera_motion_dict[camera_id]
+            # Check if camera exists in camera_info_dict
+            if camera_id not in camera_info_dict:
+                logger.warning("Camera %s not found in camera_info_dict, skipping", camera_id)
+                continue
+            
+            # Check if camera exists in camera_motion_dict
+            if camera_id not in camera_motion_dict:
+                logger.warning("Camera %s not found in camera_motion_dict, skipping", camera_id)
+                continue
+            
+            camera_info = camera_info_dict[camera_id] # 摄像头基本信息对象
+            channel_motion_dict = camera_motion_dict[camera_id] # 该摄像头所有通道的运动检测数据字典
             for channel, (if_motion,
                           camera_img_seq) in channel_motion_dict.items():
-                if not if_motion or not camera_img_seq:
+                # 即使没有检测到运动，如果有图像仍然检查条件
+                # 这允许检测静态场景
+                if not camera_img_seq: # 如果图像序列为空，则记录日志并跳过LLM检查
+                    logger.debug("Camera %s channel %s: no image sequence, skipping LLM check", camera_id, channel)
                     condition_result_list.append(
                         TriggerConditionResult(camera_info=camera_info,
                                                channel=channel,
@@ -311,13 +368,41 @@ class TriggerRuleRunner:
                                                images=None))
                     continue
 
+                # 检查图像列表是否为空，如果为空则记录日志并跳过LLM检查
+                if not camera_img_seq.img_list or len(camera_img_seq.img_list) == 0:
+                    logger.debug("Camera %s channel %s: image list is empty (len=%d), skipping LLM check", 
+                               camera_id, channel, len(camera_img_seq.img_list) if camera_img_seq.img_list else 0)
+                    condition_result_list.append(
+                        TriggerConditionResult(camera_info=camera_info,
+                                               channel=channel,
+                                               result=False,
+                                               images=None))
+                    continue
+
+                logger.debug("Camera %s channel %s: adding to LLM check queue (motion=%s, img_count=%d)",
+                           camera_id, channel, if_motion, len(camera_img_seq.img_list))
                 cameras_video[camera_id, channel] = camera_img_seq
+
+        # 如果cameras_video不为空，则记录日志：将检查多少个摄像头通过LLM
+        if cameras_video:
+            logger.info("Will check %d camera(s) with LLM for rule %s: %s", 
+                       len(cameras_video), rule.name, list(cameras_video.keys()))
+        else:
+            logger.info("No cameras with valid images for LLM check in rule %s", rule.name)
 
         # Concurrently execute LLM calls for all cameras
         tasks = []
         for (camera_id, channel), camera_img_seq in cameras_video.items():
             messages = TriggerRuleConditionPromptBuilder.build_trigger_rule_prompt(
                 camera_img_seq, rule.condition, self._get_language())
+            
+            # 记录调试信息：图像数量和条件
+            img_count = len(camera_img_seq.img_list) if camera_img_seq and camera_img_seq.img_list else 0
+            logger.info(
+                "Calling LLM for rule %s, camera %s channel %s: condition='%s', image_count=%d",
+                rule.name, camera_id, channel, rule.condition, img_count
+            )
+            
             task = self._call_vision_understaning(llm_proxy, messages.get_messages())
             tasks.append(task)
 
@@ -343,9 +428,12 @@ class TriggerRuleRunner:
                 continue
 
             content = response["content"]
+            
+            # 记录图像数量以便调试
+            img_count = len(camera_img_seq.img_list) if camera_img_seq and camera_img_seq.img_list else 0
             logger.info(
-                "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, content: %s",
-                rule.name, rule.condition, camera_id, channel, content
+                "Condition result, rule name: %s, rule condition: %s, camera_id: %s, channel: %s, image_count: %d, content: %s",
+                rule.name, rule.condition, camera_id, channel, img_count, content
             )
 
             if not content:

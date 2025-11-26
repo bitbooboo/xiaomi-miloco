@@ -88,31 +88,59 @@ class RuleTriggerFilter:
         while len(conditions) > 0 and list(conditions.keys())[0] < ts_now - self._CONTINUOUS_CHECK_INTERVAL:
             conditions.popitem(last=False)
 
-        last_status = any(list(conditions.values()))
+        last_status = any(list(conditions.values())) # 历史状态的整体判断
         conditions[ts_now] = result
 
-        # Check if continuous status(total) same as current, exec only status changed
+        # 检查连续状态（总体）是否与当前检测结果（result）相同
         if last_status == result:
+            # 如果状态为 True（条件满足），在达到最小间隔后允许重新触发
+            # 这允许对持续存在的条件进行周期性通知
+            if result:  # 条件为 True（例如，检测到入侵）
+                if len(self._trigger_history[rule_id]) > 0: # 检查是否有历史触发记录
+                    time_since_last_trigger = ts_now - self._trigger_history[rule_id][-1] # 计算距离上次触发的时间间隔（毫秒）
+                    if time_since_last_trigger >= self._TRIGGER_INTERVAL_MIN: # 如果间隔 >= 最小触发间隔（默认10秒）
+                        logger.info(
+                            "trigger_post_filter rule-%s_camera-%s: last_status-True same to current_status-True, "
+                            "but interval passed (%dms >= %dms), Exec",
+                            rule_id, camera_tag, time_since_last_trigger, self._TRIGGER_INTERVAL_MIN)
+                        self._trigger_history[rule_id].append(ts_now) # 添加当前时间戳到触发记录中
+                        return True # 返回True，允许触发
+                    else:
+                        logger.info(
+                            "trigger_post_filter rule-%s_camera-%s: last_status-True same to current_status-True, "
+                            "interval not passed (%dms < %dms), Not Exec",
+                            rule_id, camera_tag, time_since_last_trigger, self._TRIGGER_INTERVAL_MIN)
+                        return False # 返回False，不允许触发
+                else:
+                    # 首次检测到，允许触发
+                    logger.info(
+                        "trigger_post_filter rule-%s_camera-%s: first time detecting True, Exec",
+                        rule_id, camera_tag)
+                    self._trigger_history[rule_id].append(ts_now)
+                    return True
+            else:  # 条件为 False（例如，无入侵）
+                logger.info(
+                    "trigger_post_filter rule-%s_camera-%s: last_status-False same to current_status-False, Not Exec",
+                    rule_id, camera_tag)
+                return False
+        else:
+            # 状态发生变化，检查上次触发时间是否太近
+            if (len(self._trigger_history[rule_id]) > 0 and
+                    ts_now - self._trigger_history[rule_id][-1] <
+                    self._TRIGGER_INTERVAL_MIN): # 如果有历史记录，且距离上次触发时间 < 最小间隔
+                logger.info(
+                    "trigger_post_filter rule-%s_camera-%s: status changed %s->%s, "
+                    "but last_trigger_time-%d too close to current_trigger_time-%d, Not Exec",
+                    rule_id, camera_tag, last_status, result, self._trigger_history[rule_id][-1], ts_now)
+                return False # 记录日志：状态已变化，但触发时间太近，返回 False，不触发
+
+            # 状态发生变化且间隔已过，允许触发
             logger.info(
-                "trigger_post_filter rule-%s_camera-%s: last_status-%s same to current_status-%s, Not Exec",
+                "trigger_post_filter rule-%s_camera-%s: status changed %s->%s, Exec",
                 rule_id, camera_tag, last_status, result)
-            return False
-
-        # Check if the last trigger time is too close
-        if (len(self._trigger_history[rule_id]) > 0 and
-                ts_now - self._trigger_history[rule_id][-1] <
-                self._TRIGGER_INTERVAL_MIN):
-            logger.info(
-                "trigger_post_filter rule-%s_camera-%s: last_trigger_time-%d "
-                "too close to current_trigger_time-%d, Not Exec",
-                rule_id, camera_tag, self._trigger_history[rule_id][-1], ts_now)
-            return False
-
-        # Same rule different condition has been filtered by TRIGGER_INTERVAL_MIN
-        if result:
-            self._trigger_history[rule_id].append(ts_now)
-
-        return result
+            if result:
+                self._trigger_history[rule_id].append(ts_now)
+            return True
 
 
 trigger_filter = RuleTriggerFilter()

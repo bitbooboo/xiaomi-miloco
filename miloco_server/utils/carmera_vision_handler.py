@@ -138,7 +138,7 @@ class CameraVisionHandler:
 
     async def add_camera_img(self, did: str, data: bytes, ts: int, channel: int):
         logger.debug("add_camera_img camera_id: %s, camera timestamp: %d, image_size: %d", did, ts, len(data))
-        self.camera_img_queues[channel].put(CameraImgInfo(data=data, timestamp=int(time.time())))
+        self.camera_img_queues[channel].put(CameraImgInfo(data=data, timestamp=int(time.time() * 1000))) # schema单位是毫秒
 
     async def update_camera_info(self, camera_info: MIoTCameraInfo) -> None:
         self.camera_info = camera_info

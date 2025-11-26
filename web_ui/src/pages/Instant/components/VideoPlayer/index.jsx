@@ -8,6 +8,7 @@ import { Spin, message } from 'antd'
 import { useTranslation } from 'react-i18next';
 import { isFirefox, sleep } from '@/utils/util';
 import DefaultCameraBg from '@/assets/images/default-camera-bg.png'
+import Hls from 'hls.js'
 
 /**
  * Detect video codec from binary data
@@ -50,13 +51,16 @@ const detectCodec = (data) => {
 const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, onCanvasRef, onPlay }) => {
   const { t } = useTranslation();
   const canvasRef = useRef(null)
+  const videoRef = useRef(null)
   const wsRef = useRef(null)
   const decoderRef = useRef(null)
+  const hlsRef = useRef(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [show, setShow] = useState(false)
   const [isSupported, setIsSupported] = useState(null)
   const [autoCodec, setAutoCodec] = useState(null);
+  const isHACamera = cameraId && cameraId.startsWith('ha_');
 
   // detect WebCodecs support
   useEffect(() => {
@@ -146,10 +150,167 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
     }
   }, [onCanvasRef, show])
 
+  // HLS player for HA cameras
   useEffect(() => {
-    const init = async () => {
-      if (!cameraId || isSupported === null) {return} // wait for support detection to complete
+    if (!isHACamera || !cameraId) return;
 
+    const initHLS = async () => {
+      setLoading(true)
+      setError(null)
+      setShow(false)
+
+      // Clean up existing HLS instance
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.destroy()
+        } catch (e) {
+          console.error('Destroy HLS exception:', e);
+        }
+        hlsRef.current = null;
+      }
+
+      // Get HLS stream URL
+      try {
+        const apiBase = import.meta.env.VITE_API_BASE || ''
+        const response = await fetch(`${apiBase}/api/ha/camera_hls_stream_url/${encodeURIComponent(cameraId)}`, {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('access_token') || ''}`
+          }
+        })
+        const data = await response.json()
+        
+        if (data.code !== 0 || !data.data?.hls_url) {
+          setError(t('instant.deviceList.deviceNotSupport'))
+          message.error(t('instant.deviceList.deviceNotSupport'))
+          onPlay && onPlay()
+          return
+        }
+
+        const hlsUrl = `${window.location.origin}${data.data.hls_url}`
+        
+        // Wait for container to be available
+        await sleep(100)
+        
+        // Create video element for HLS playback
+        let video = videoRef.current
+        if (!video) {
+          video = document.createElement('video')
+          video.style.width = '100%'
+          video.style.height = '100%'
+          video.style.objectFit = 'cover'
+          video.style.borderRadius = '8px'
+          video.playsInline = true
+          video.muted = true
+          video.autoplay = true
+          videoRef.current = video
+        }
+        
+        // Find container and append video
+        const container = document.getElementById(`hls-video-container-${cameraId}`)
+        if (container && !container.contains(video)) {
+          container.appendChild(video)
+        }
+
+        if (Hls.isSupported()) {
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+            backBufferLength: 90
+          })
+          hlsRef.current = hls
+          
+          hls.loadSource(hlsUrl)
+          hls.attachMedia(video)
+
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            video.play().then(() => {
+              setLoading(false)
+              setShow(true)
+              if (onCanvasRef && videoRef.current) {
+                onCanvasRef({ current: videoRef.current })
+              }
+            }).catch(err => {
+              console.error('Video play error:', err)
+              setError(t('instant.deviceList.deviceConnectFailed'))
+              message.error(t('instant.deviceList.deviceConnectFailed'))
+              onPlay && onPlay()
+            })
+          })
+
+          hls.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+              console.error('HLS error:', data)
+              setError(t('instant.deviceList.deviceConnectFailed'))
+              message.error(t('instant.deviceList.deviceConnectFailed'))
+              onPlay && onPlay()
+            }
+          })
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          // Native HLS support (Safari)
+          video.src = hlsUrl
+          video.addEventListener('loadedmetadata', () => {
+            video.play().then(() => {
+              setLoading(false)
+              setShow(true)
+              if (onCanvasRef && videoRef.current) {
+                onCanvasRef({ current: videoRef.current })
+              }
+            }).catch(err => {
+              console.error('Video play error:', err)
+              setError(t('instant.deviceList.deviceConnectFailed'))
+              message.error(t('instant.deviceList.deviceConnectFailed'))
+              onPlay && onPlay()
+            })
+          })
+          video.addEventListener('error', () => {
+            setError(t('instant.deviceList.deviceConnectFailed'))
+            message.error(t('instant.deviceList.deviceConnectFailed'))
+            onPlay && onPlay()
+          })
+        } else {
+          setError(t('instant.deviceList.browserNotSupport'))
+          message.error(t('instant.deviceList.browserNotSupport'))
+          onPlay && onPlay()
+        }
+      } catch (err) {
+        console.error('HLS init error:', err)
+        setError(t('instant.deviceList.deviceConnectFailed'))
+        message.error(t('instant.deviceList.deviceConnectFailed'))
+        onPlay && onPlay()
+      }
+    }
+
+    initHLS()
+
+    return () => {
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.destroy()
+        } catch (e) {
+          console.error('Destroy HLS exception:', e);
+        }
+        hlsRef.current = null;
+      }
+      if (videoRef.current) {
+        try {
+          videoRef.current.pause()
+          videoRef.current.src = ''
+          if (videoRef.current.parentNode) {
+            videoRef.current.parentNode.removeChild(videoRef.current)
+          }
+        } catch (e) {
+          console.error('Remove video exception:', e);
+        }
+        videoRef.current = null;
+      }
+    }
+  }, [cameraId, channel, isHACamera, onPlay, onCanvasRef, t])
+
+  // WebSocket player for MIoT cameras
+  useEffect(() => {
+    if (isHACamera || !cameraId || isSupported === null) return; // wait for support detection to complete
+
+    const init = async () => {
       if (isFirefox()) {
         setError(t('instant.deviceList.browserNotSupport'))
         message.error(t('instant.deviceList.browserNotSupport'))
@@ -297,7 +458,7 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
         decoderRef.current = null;
       }
     }
-  }, [codec, isSupported, cameraId, channel])
+  }, [codec, isSupported, cameraId, channel, isHACamera])
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', ...style }}>
@@ -326,6 +487,7 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
       {!show && poster && (
         <img src={poster} alt="poster" style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 8 }} />
       )}
+      {!isHACamera && (
       <canvas
         ref={canvasRef}
         style={{
@@ -333,6 +495,16 @@ const VideoPlayer = ({ codec = 'avc1.42E01E', poster, style, cameraId, channel, 
           opacity: show ? 1 : 0, transition: 'opacity 0.4s cubic-bezier(.4,0,.2,1)'
         }}
       />
+      )}
+      {isHACamera && (
+        <div
+          id={`hls-video-container-${cameraId}`}
+          style={{
+            width: '100%', height: '100%', borderRadius: 8,
+            opacity: show ? 1 : 0, transition: 'opacity 0.4s cubic-bezier(.4,0,.2,1)'
+          }}
+        />
+      )}
     </div>
   )
 }

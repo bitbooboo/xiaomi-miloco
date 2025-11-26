@@ -156,7 +156,7 @@ const DeviceItem = ({ item, onPlay, playing }) => {
           <div className={styles.info}>
             <div className={styles.infoTop}>
               <div className={styles.top}>
-                <div className={`${styles.name} ${playing ? styles.playColor : ''}`}>{item.room_name || t('instant.deviceList.noDevice')}</div>
+                <div className={`${styles.name} ${playing ? styles.playColor : ''}`}>{item.room_name || item.home_name || t('instant.deviceList.noDevice')}</div>
               </div>
               <div className={`${styles.bottom} ${playing ? styles.playColor : ''}`}>{item.name || t('instant.deviceList.noDevice')}</div>
             </div>

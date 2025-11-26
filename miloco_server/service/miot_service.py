@@ -67,8 +67,15 @@ class MiotService:
         try:
             return await self._miot_proxy.refresh_miot_info()
         except Exception as e: # pylint: disable=broad-exception-caught
-            logger.error("Failed to refresh MiOT all information: %s", e)
-            raise MiotServiceException(f"Failed to refresh MiOT all information: {str(e)}") from e
+            # If refresh fails (e.g., no MiOT login), return default result instead of raising exception
+            # This allows the system to work without requiring MiOT authentication
+            logger.warning("Failed to refresh MiOT all information, returning default result: %s", e)
+            return {
+                "cameras": False,
+                "scenes": False,
+                "user_info": False,
+                "devices": False
+            }
 
     async def refresh_miot_cameras(self):
         """
@@ -77,11 +84,15 @@ class MiotService:
         try:
             result = await self._miot_proxy.refresh_cameras()
             if not result:
-                raise MiotServiceException("Failed to refresh MiOT cameras")
+                # If no MiOT account is logged in, return True to allow system access
+                logger.warning("Failed to refresh MiOT cameras: No MiOT account logged in")
+                return True
             return True
         except Exception as e:
-            logger.error("Failed to refresh MiOT cameras: %s", e)
-            raise MiotServiceException(f"Failed to refresh MiOT cameras: {str(e)}") from e
+            # If refresh fails (e.g., no MiOT login), return True instead of raising exception
+            # This allows the system to work without requiring MiOT authentication
+            logger.warning("Failed to refresh MiOT cameras, continuing without MiOT cameras: %s", e)
+            return True
 
     async def refresh_miot_scenes(self):
         """
@@ -90,11 +101,15 @@ class MiotService:
         try:
             result = await self._miot_proxy.refresh_scenes()
             if not result:
-                raise MiotServiceException("Failed to refresh MiOT scenes")
+                # If no MiOT account is logged in, return True to allow system access
+                logger.warning("Failed to refresh MiOT scenes: No MiOT account logged in")
+                return True
             return True
         except Exception as e:
-            logger.error("Failed to refresh MiOT scenes: %s", e)
-            raise MiotServiceException(f"Failed to refresh MiOT scenes: {str(e)}") from e
+            # If refresh fails (e.g., no MiOT login), return True instead of raising exception
+            # This allows the system to work without requiring MiOT authentication
+            logger.warning("Failed to refresh MiOT scenes, continuing without MiOT scenes: %s", e)
+            return True
 
     async def refresh_miot_user_info(self):
         """
@@ -111,12 +126,19 @@ class MiotService:
 
     async def refresh_miot_devices(self):
         """
-        Refresh MiOT device information
+        Refresh MiOT device information (including HA cameras)
         """
         try:
             result = await self._miot_proxy.refresh_devices()
             if not result:
-                raise MiotServiceException("Failed to refresh MiOT devices")
+                logger.error("Failed to refresh MiOT devices: refresh_devices returned None")
+                raise MiotServiceException("Failed to refresh MiOT devices: refresh operation returned no result")
+            
+            # 同时刷新HA摄像头
+            from miloco_server.service.manager import get_manager
+            manager = get_manager()
+            await manager.ha_service.refresh_ha_cameras()
+
             return True
         except Exception as e:
             logger.error("Failed to refresh MiOT devices: %s", e)
@@ -133,15 +155,49 @@ class MiotService:
             MiotOAuthException: When user is not logged in or login status check fails
         """
         try:
-            is_token_valid = await self._miot_proxy.check_token_valid()
-            if not is_token_valid:
-                login_url = await self._miot_proxy.get_miot_login_url()
-                return {"is_logged_in": False, "login_url": login_url}
+            # Allow system login without requiring MiOT account login
+            # System can enter home page after PIN login without MiOT authentication
             return {"is_logged_in": True}
+            
+            # Original code (commented out):
+            # is_token_valid = await self._miot_proxy.check_token_valid()
+            # if not is_token_valid:
+            #     login_url = await self._miot_proxy.get_miot_login_url()
+            #     return {"is_logged_in": False, "login_url": login_url}
+            # return {"is_logged_in": True}
 
         except Exception as e:
             logger.error("Failed to check MiOT login status: %s", e)
             raise MiotOAuthException(f"Failed to check MiOT login status: {str(e)}") from e
+
+    async def check_miot_auth_status(self) -> dict:
+        """
+        Check MiOT authorization status (for settings page)
+        
+        Returns:
+            dict: Dictionary containing is_configured status
+        """
+        try:
+            is_token_valid = await self._miot_proxy.check_token_valid()
+            return {"is_configured": is_token_valid}
+        except Exception as e:
+            # If check fails, assume not configured
+            logger.warning("Failed to check MiOT auth status, assuming not configured: %s", e)
+            return {"is_configured": False}
+
+    async def get_miot_login_url(self) -> dict:
+        """
+        Get MiOT login URL for authorization
+        
+        Returns:
+            dict: Dictionary containing login_url
+        """
+        try:
+            login_url = await self._miot_proxy.get_miot_login_url()
+            return {"login_url": login_url}
+        except Exception as e:
+            logger.error("Failed to get MiOT login URL: %s", e)
+            raise MiotServiceException(f"Failed to get MiOT login URL: {str(e)}") from e
 
     async def get_miot_user_info(self) -> MIoTUserInfo:
         """
@@ -158,16 +214,31 @@ class MiotService:
             user_info = await self._miot_proxy.get_user_info()
 
             if not user_info:
-                raise ResourceNotFoundException("No logged in user information found")
+                # If no MiOT account is logged in, return a default user info
+                # This allows the system to work without requiring MiOT authentication
+                logger.info("No MiOT user info found, returning default user info")
+                return MIoTUserInfo(
+                    uid="",
+                    nickname="Guest",
+                    icon="",
+                    union_id=""
+                )
 
             return user_info
         except Exception as e:
-            logger.error("Failed to get MiOT user info: %s", e)
-            raise MiotServiceException(f"Failed to get MiOT user info: {str(e)}") from e
+            # If there's an error (e.g., 401 Unauthorized), return default user info
+            # instead of raising an exception to allow system access without MiOT login
+            logger.warning("Failed to get MiOT user info, returning default: %s", e)
+            return MIoTUserInfo(
+                uid="",
+                nickname="Guest",
+                icon="",
+                union_id=""
+            )
 
     async def get_miot_camera_list(self) -> List[CameraInfo]:
         """
-        Get MiOT camera list
+        Get MiOT camera list (including both Xiaomi and Home Assistant cameras)
 
         Returns:
             List[CameraInfo]: Camera information list
@@ -176,16 +247,27 @@ class MiotService:
             MiotServiceException: When getting camera list fails
         """
         try:
+            # Get Xiaomi cameras
             camera_dict: dict[
                 str,
                 MIoTCameraInfo] | None = await self._miot_proxy.get_cameras()
-            if not camera_dict:
-                raise MiotServiceException("Failed to get MiOT camera list")
+            
+            camera_list = []
+            if camera_dict:
+                camera_list = [
+                    CameraInfo.model_validate(camera_info.model_dump())
+                    for camera_info in camera_dict.values()
+                ]
 
-            camera_list = [
-                CameraInfo.model_validate(camera_info.model_dump())
-                for camera_info in camera_dict.values()
-            ]
+            # Get Home Assistant cameras and merge
+            try:
+                from miloco_server.service.manager import get_manager
+                manager = get_manager()
+                ha_cameras = await manager.ha_service.get_ha_cameras()
+                camera_list.extend(ha_cameras)
+                logger.info("Merged %d HA cameras with %d MiOT cameras", len(ha_cameras), len(camera_list) - len(ha_cameras))
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning("Failed to get HA cameras, continuing with MiOT cameras only: %s", e)
 
             return camera_list
         except MiotServiceException:
@@ -198,12 +280,25 @@ class MiotService:
         try:
             device_dict: dict[
                 str, MIoTDeviceInfo] = await self._miot_proxy.get_devices()
-            if not device_dict:
-                raise MiotServiceException("Failed to get MiOT device list")
-            device_list = [
-                DeviceInfo.model_validate(device_info.model_dump())
-                for device_info in device_dict.values()
-            ]
+            
+            device_list = []
+            if device_dict:
+                device_list = [
+                    DeviceInfo.model_validate(device_info.model_dump())
+                    for device_info in device_dict.values()
+                ]
+
+            # Get Home Assistant cameras and merge as devices
+            try:
+                from miloco_server.service.manager import get_manager
+                manager = get_manager()
+                ha_cameras = await manager.ha_service.get_ha_cameras()
+                # CameraInfo extends DeviceInfo, so we can add them directly
+                device_list.extend(ha_cameras)
+                logger.info("Merged %d HA cameras with %d MiOT devices", len(ha_cameras), len(device_list) - len(ha_cameras))
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning("Failed to get HA cameras for device list, continuing with MiOT devices only: %s", e)
+
             return device_list
         except MiotServiceException:
             raise
@@ -216,32 +311,48 @@ class MiotService:
         logger.info(
             "get_miot_cameras_img, camera_dids: %s", ", ".join(camera_dids))
         try:
-            all_camera_info: dict[str, MIoTCameraInfo] = await self._miot_proxy.get_cameras()
-            if not all_camera_info:
-                return []
-
-            selected_camera_info: list[MIoTCameraInfo] = [
-                info for info in all_camera_info.values() if (info.did in camera_dids)
-            ]
-
-            camera_channels: list[CameraChannel] = []
-            for camera_info in selected_camera_info:
-                for channel in range(camera_info.channel_count or 1):
-                    camera_channels.append(
-                        CameraChannel(did=camera_info.did, channel=channel))
+            # Separate HA cameras (prefixed with "ha_") from MiOT cameras
+            ha_camera_dids = [did for did in camera_dids if did.startswith("ha_")]
+            miot_camera_dids = [did for did in camera_dids if not did.startswith("ha_")]
 
             camera_img_seqs = []
-            for camera_channel in camera_channels:
-                camera_img_seq = self._miot_proxy.get_recent_camera_img(
-                    camera_channel.did, camera_channel.channel, vision_use_img_count)
-                if not camera_img_seq:
-                    logger.error(
-                        "get_miot_cameras_img, get recent camera img failed, did: %s, channel: %s",
-                        camera_channel.did, camera_channel.channel
-                    )
-                    continue
 
-                camera_img_seqs.append(camera_img_seq)
+            # Get MiOT camera images
+            if miot_camera_dids:
+                all_camera_info: dict[str, MIoTCameraInfo] = await self._miot_proxy.get_cameras()
+                if all_camera_info:
+                    selected_camera_info: list[MIoTCameraInfo] = [
+                        info for info in all_camera_info.values() if (info.did in miot_camera_dids)
+                    ]
+
+                    camera_channels: list[CameraChannel] = []
+                    for camera_info in selected_camera_info:
+                        for channel in range(camera_info.channel_count or 1):
+                            camera_channels.append(
+                                CameraChannel(did=camera_info.did, channel=channel))
+
+                    for camera_channel in camera_channels:
+                        camera_img_seq = self._miot_proxy.get_recent_camera_img(
+                            camera_channel.did, camera_channel.channel, vision_use_img_count)
+                        if not camera_img_seq:
+                            logger.error(
+                                "get_miot_cameras_img, get recent camera img failed, did: %s, channel: %s",
+                                camera_channel.did, camera_channel.channel
+                            )
+                            continue
+
+                        camera_img_seqs.append(camera_img_seq)
+
+            # Get HA camera images
+            if ha_camera_dids:
+                try:
+                    from miloco_server.service.manager import get_manager
+                    manager = get_manager()
+                    ha_img_seqs = await manager.ha_service.get_ha_cameras_img(ha_camera_dids, vision_use_img_count)
+                    camera_img_seqs.extend(ha_img_seqs)
+                except Exception as e:  # pylint: disable=broad-exception-caught
+                    logger.error("Failed to get HA camera images: %s", e)
+
             return camera_img_seqs
         except Exception as e:
             logger.error("Failed to get MiOT camera images: %s", e)
@@ -295,9 +406,11 @@ class MiotService:
     async def start_video_stream(self, camera_id: str, channel: int, callback):
         """
         Start video stream (business layer method)
+        Note: HA cameras are already filtered at the controller layer.
+        This method only handles MIoT cameras.
 
         Args:
-            camera_id: Camera device ID
+            camera_id: Camera device ID (MIoT cameras only, HA cameras filtered at controller layer)
             channel: Channel number
             callback: Video data callback function
 
@@ -306,6 +419,8 @@ class MiotService:
         """
         try:
             logger.info("Starting video stream: camera_id=%s, channel=%s", camera_id, channel)
+            
+            # MIoT camera video stream
             if callback:
                 await self._miot_proxy.start_camera_raw_stream(
                     camera_id, channel, callback)
@@ -318,15 +433,25 @@ class MiotService:
     async def stop_video_stream(self, camera_id: str, channel: int):
         """
         Stop video stream (business layer method)
+        Supports both MIoT cameras and Home Assistant cameras
 
         Args:
-            camera_id: Camera device ID
+            camera_id: Camera device ID (MIoT cameras or HA cameras with "ha_" prefix)
+            channel: Channel number
 
         Raises:
             MiotServiceException: When stopping fails
         """
         try:
             logger.info("Stopping video stream: camera_id=%s", camera_id)
+            
+            # Check if this is a Home Assistant camera
+            if camera_id.startswith("ha_"):
+                # HA cameras don't have active video streams to stop
+                logger.info("HA camera %s doesn't have active video stream to stop", camera_id)
+                return
+            
+            # MIoT camera video stream
             await self._miot_proxy.stop_camera_raw_stream(camera_id, channel)
             logger.info("Video stream stopped successfully: camera_id=%s", camera_id)
         except Exception as e:
