@@ -400,7 +400,7 @@ class ChatAgent(Actor):
         for tool_call in tool_calls:
             await self._execute_single_tool(tool_call)
 
-    async def _execute_single_tool(
+    async def   _execute_single_tool(
             self, tool_call: ChatCompletionMessageToolCall) -> None:
         """Execute single tool call."""
         original_tool_name = tool_call.function.name

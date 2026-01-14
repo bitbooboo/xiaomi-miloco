@@ -73,7 +73,7 @@ async def send_message(
         "telephone": telephone,
         "erp": erp,
         "msgtype": msgtype,
-        "subject": subject if subject else "",
+        "subject": subject if subject else "sub",
         "content": content
     }
     
@@ -82,10 +82,10 @@ async def send_message(
                    msgtype, telephone, erp, subject, content)
         logger.info("Request payload: %s", payload)
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # response = await client.post(url, headers=headers, json=payload)
-            # response.raise_for_status()
-            # result = response.json() if response.content else {}
-            result = {}
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json() if response.content else {}
+            # result = {}
             logger.info("**************************> Message sent successfully via %s, response: %s", msgtype, result)
             return {
                 "success": True,

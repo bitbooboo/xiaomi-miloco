@@ -98,6 +98,7 @@ class OpenAIProxy(LLMProxy):
         """Return developer-friendly string representation of the object."""
         return self.__str__()
 
+    # 在 model_service.py 的第99-105行，明确创建了 OpenAIProxy 实例并存入 _llm_proxy_by_purpose 字典。
     async def async_call_llm(self, messages: list[ChatCompletionMessageParam],
                            tools: Optional[list[ChatCompletionToolParam]] = None) -> dict[str, any]:
         """
@@ -115,6 +116,7 @@ class OpenAIProxy(LLMProxy):
                 "Async calling model: %s, stream: False, messages: %s, tools: %s",
                 self.model_name, messages, tools
             )
+            # ---------%%%%%-------->>>>>>>>>> 在这里调用视觉理解LLM
             completion = await self.async_client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,

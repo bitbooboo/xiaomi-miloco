@@ -123,57 +123,58 @@ class LlamaMico:
 
         return decoded_text
 
-    def _request_prompt(
-            self, handle: ctypes.c_void_p,
-            request_data: Dict[str, Any]) -> ChatCompletionResponse:
+    def _request_prompt(  # 处理提示请求的私有方法
+            self, handle: ctypes.c_void_p,  # 自身引用、模型句柄（C语言void指针类型）
+            request_data: Dict[str, Any]) -> ChatCompletionResponse:  # 请求数据字典，返回聊天完成响应
         """
-        Process prompt request
+        Process prompt request  # 处理提示请求
         """
-        if not handle:
-            raise InvalidArgException("handle cannot be empty")
+        if not handle:  # 如果句柄为空
+            raise InvalidArgException("handle cannot be empty")  # 抛出异常：句柄不能为空
 
-        current_id = int(request_data["id"].split("-")[-1])
-        request_json = json.dumps(request_data, ensure_ascii=False)
-        request_json_bytes = request_json.encode("utf-8")
-        # Allocate output parameter pointers
-        is_finished_ptr = ctypes.c_int32()
-        content_ptr = ctypes.c_char_p()
+        current_id = int(request_data["id"].split("-")[-1])  # 从请求ID中提取当前ID（取最后一个"-"后的数字）
+        request_json = json.dumps(request_data, ensure_ascii=False)  # 将请求数据转换为JSON字符串（确保非ASCII字符正确编码）
+        request_json_bytes = request_json.encode("utf-8")  # 将JSON字符串编码为UTF-8字节
+        # Allocate output parameter pointers  # 分配输出参数指针
+        is_finished_ptr = ctypes.c_int32()  # 创建C语言int32类型指针，用于接收是否完成标志
+        content_ptr = ctypes.c_char_p()  # 创建C语言字符指针，用于接收内容
 
-        llama_mico_lib = get_library()
-        ret = llama_mico_lib.llama_mico_request_prompt(
-            handle, request_json_bytes, ctypes.byref(is_finished_ptr),
-            ctypes.byref(content_ptr))
+        llama_mico_lib = get_library()  # 获取llama_mico C库
+        # ---------%%%%%-------->>>>>>>>>> LLM 模型推理（实际识别和判断）
+        ret = llama_mico_lib.llama_mico_request_prompt(  # 调用C库的llama_mico_request_prompt函数
+            handle, request_json_bytes, ctypes.byref(is_finished_ptr),  # 参数：句柄、请求JSON字节、是否完成指针的引用
+            ctypes.byref(content_ptr))  # 内容指针的引用
 
-        content = self._parse_content(content_ptr, current_id)
-        # todo: Process the ret code uniformly
-        if ret == -1:
-            err = f"Prompt request failed: {content}"
-            logger.error(err)
-            with self._counter_lock:
-                self._active_modal_buffers.pop(current_id, None)
-            raise CoreNormalException(err)
+        content = self._parse_content(content_ptr, current_id)  # 解析内容指针，获取生成的内容
+        # todo: Process the ret code uniformly  # 待办：统一处理返回码
+        if ret == -1:  # 如果返回码为-1（表示失败）
+            err = f"Prompt request failed: {content}"  # 构建错误消息：提示请求失败
+            logger.error(err)  # 记录错误日志
+            with self._counter_lock:  # 使用计数器锁保护
+                self._active_modal_buffers.pop(current_id, None)  # 从活动模态缓冲区中移除当前ID
+            raise CoreNormalException(err)  # 抛出核心异常
 
-        is_finished = is_finished_ptr.value
-        finish_reason = FinishReason.STOP if is_finished else None
-        finish_reason = FinishReason.LENGTH if (is_finished and ret == -2) else finish_reason
-        if finish_reason == FinishReason.LENGTH:
-            logger.error("Generate token too long")
+        is_finished = is_finished_ptr.value  # 获取是否完成标志的值
+        finish_reason = FinishReason.STOP if is_finished else None  # 如果完成则设置为STOP，否则为None
+        finish_reason = FinishReason.LENGTH if (is_finished and ret == -2) else finish_reason  # 如果完成且返回码为-2则设置为LENGTH（长度限制）
+        if finish_reason == FinishReason.LENGTH:  # 如果完成原因是长度限制
+            logger.error("Generate token too long")  # 记录错误日志：生成的token太长
 
-        response = ChatCompletionResponse(
-            id=request_data.get("id", "local-chatcmpl-0"),
-            created=int(time.time()),
-            choices=[
-                ChatCompletionChoice(index=0,
-                                     delta=ChatMessage(role=Role.ASSISTANT,
-                                                       content=content),
-                                     finish_reason=finish_reason)
+        response = ChatCompletionResponse(  # 创建聊天完成响应对象
+            id=request_data.get("id", "local-chatcmpl-0"),  # 响应ID（从请求数据获取，默认为"local-chatcmpl-0"）
+            created=int(time.time()),  # 创建时间戳（当前时间的整数秒）
+            choices=[  # 选择列表
+                ChatCompletionChoice(index=0,  # 选择索引为0
+                                     delta=ChatMessage(role=Role.ASSISTANT,  # 增量消息：角色为助手
+                                                       content=content),  # 内容为解析后的内容
+                                     finish_reason=finish_reason)  # 完成原因
             ])
 
-        # logger.debug(
-        #     f"Prompt request processed successfully, is_finished: {is_finished}, content: {content}")
-        with self._counter_lock:
-            self._active_modal_buffers.pop(current_id, None)
-        return response
+        # logger.debug(  # 调试日志（已注释）
+        #     f"Prompt request processed successfully, is_finished: {is_finished}, content: {content}")  # 日志消息：提示请求处理成功
+        with self._counter_lock:  # 使用计数器锁保护
+            self._active_modal_buffers.pop(current_id, None)  # 从活动模态缓冲区中移除当前ID
+        return response  # 返回响应对象
 
     def _request_generate(
             self, handle: ctypes.c_void_p,

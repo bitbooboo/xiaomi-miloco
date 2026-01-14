@@ -41,42 +41,42 @@ class RuleTriggerFilter:
 
         self._trigger_history.setdefault(rule_id, deque(maxlen=filter_frequency))
 
-    def pre_filter(self, rule: TriggerRule) -> bool:
-        """Pre Trigger filter."""
-        ts_now = int(datetime.datetime.now().timestamp() * 1000)
-        if not rule.enabled:
-            return False
+    def pre_filter(self, rule: TriggerRule) -> bool:  # 预过滤器方法：在触发前进行过滤检查
+        """Pre Trigger filter."""  # 预触发器过滤器
+        ts_now = int(datetime.datetime.now().timestamp() * 1000)  # 获取当前时间戳（毫秒）
+        if not rule.enabled:  # 如果规则未启用
+            return False  # 返回False，不允许触发
 
-        if not rule.filter:
-            return True
+        if not rule.filter:  # 如果规则没有过滤器配置
+            return True  # 返回True，允许触发
 
-        frequency = rule.filter.frequency.frequency if rule.filter.frequency else 1
-        self._default_rule_state(rule.id, filter_frequency=frequency)
+        frequency = rule.filter.frequency.frequency if rule.filter.frequency else 1  # 获取触发频率，如果没有则默认为1
+        self._default_rule_state(rule.id, filter_frequency=frequency)  # 初始化规则状态，设置触发历史队列的最大长度
 
-        # Check trigger period
-        cron_expression = rule.filter.period
-        if cron_expression and croniter.is_valid(cron_expression):
-            if not croniter.match(cron_expression, datetime.datetime.fromtimestamp(ts_now/1000)):
-                logger.info(
-                    "trigger_pre_filter rule-%s: period_cron: %s mismatch now_timestamp: %d, Not Exec",
-                    rule.id, cron_expression, ts_now)
-                return False
+        # Check trigger period  # 检查触发时间段
+        cron_expression = rule.filter.period  # 获取Cron表达式（时间段配置）
+        if cron_expression and croniter.is_valid(cron_expression):  # 如果Cron表达式存在且有效
+            if not croniter.match(cron_expression, datetime.datetime.fromtimestamp(ts_now/1000)):  # 如果当前时间不匹配Cron表达式
+                logger.info(  # 记录信息日志
+                    "trigger_pre_filter rule-%s: period_cron: %s mismatch now_timestamp: %d, Not Exec",  # 日志消息：时间段不匹配
+                    rule.id, cron_expression, ts_now)  # 日志参数：规则ID、Cron表达式、当前时间戳
+                return False  # 返回False，不允许触发
 
-        # Check trigger frequency
-        trigger_queue: deque = self._trigger_history[rule.id]
-        filters = [rule.filter.frequency] if rule.filter.frequency else []
-        if rule.filter.interval:
-            filters.append(TriggerFrequencyFilter(frequency=1, period=rule.filter.interval))
+        # Check trigger frequency  # 检查触发频率
+        trigger_queue: deque = self._trigger_history[rule.id]  # 获取该规则的触发历史队列
+        filters = [rule.filter.frequency] if rule.filter.frequency else []  # 如果存在频率过滤器，则添加到过滤器列表
+        if rule.filter.interval:  # 如果存在间隔配置
+            filters.append(TriggerFrequencyFilter(frequency=1, period=rule.filter.interval))  # 添加间隔过滤器到过滤器列表
 
-        for freq_filter in filters:
-            if (len(trigger_queue) >= freq_filter.frequency and
-                    ts_now - trigger_queue[-freq_filter.frequency] < freq_filter.period * 1000):
-                logger.info(
-                    "trigger_pre_filter rule-%s: over frequency: %d/%ds, Not Exec",
-                    rule.id, freq_filter.frequency, freq_filter.period)
-                return False
+        for freq_filter in filters:  # 遍历所有频率过滤器
+            if (len(trigger_queue) >= freq_filter.frequency and  # 如果触发队列长度大于等于频率阈值
+                    ts_now - trigger_queue[-freq_filter.frequency] < freq_filter.period * 1000):  # 且距离第N次触发的时间小于周期（转换为毫秒）
+                logger.info(  # 记录信息日志
+                    "trigger_pre_filter rule-%s: over frequency: %d/%ds, Not Exec",  # 日志消息：超过频率限制
+                    rule.id, freq_filter.frequency, freq_filter.period)  # 日志参数：规则ID、频率、周期
+                return False  # 返回False，不允许触发
 
-        return True
+        return True  # 返回True，允许触发
 
     def post_filter(self, rule_id: str, camera_tag: str, result: bool) -> bool:
         """Post Trigger filter."""

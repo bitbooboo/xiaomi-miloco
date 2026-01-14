@@ -212,6 +212,7 @@ class TaskScheduler(Actor):
         task_id = str(uuid.uuid4())
 
         request: ChatCompletionRequest = message.data
+        # ---------%%%%%-------->>>>>>>>>> 在这里进行规则判断
         task_label, task_priority = self._task_classification(request.messages)
         # Do not distinguish different task queues for now
         task = actor_system.createActor(
