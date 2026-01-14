@@ -36,7 +36,7 @@ RUN set -eux \
     && apt-get install -y build-essential cmake git
 
 COPY miloco_ai_engine/core /app/miloco_ai_engine/core
-COPY third_party /app/third_partysdddd
+COPY third_party /app/third_party
 COPY scripts/ai_engine_cuda_build.sh /app/scripts/ai_engine_cuda_build.sh
 
 RUN bash /app/scripts/ai_engine_cuda_build.sh
